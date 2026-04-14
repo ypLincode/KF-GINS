@@ -64,9 +64,10 @@ public:
     void addGnssData(const GNSS &gnss) {
 
         gnssdata_ = gnss;
-        // 暂不进行数据有效性检查，GNSS数据默认有效
-        // do not check the validity of gnssdata, the gnssdata is valid by default
-        gnssdata_.isvalid = true;
+        // 仅当位置标准差合理时才标记为有效，防止接受明显异常的GNSS观测
+        // Mark as valid only when position std is sensible, preventing obviously bad GNSS fixes
+        gnssdata_.isvalid = (gnss.std[0] > 0 && gnss.std[1] > 0 && gnss.std[2] > 0 &&
+                             gnss.std[0] < 1000.0 && gnss.std[1] < 1000.0 && gnss.std[2] < 1000.0);
     }
 
     /**
@@ -111,6 +112,14 @@ public:
      * */
     double timestamp() const {
         return timestamp_;
+    }
+
+    /**
+     * @brief 获取引擎是否处于健康状态（协方差未发散）
+     *        get whether the engine is in a healthy state (covariance not diverged)
+     * */
+    bool isHealthy() const {
+        return is_healthy_;
     }
 
     /**
@@ -184,6 +193,35 @@ private:
     void gnssUpdate(GNSS &gnssdata);
 
     /**
+     * @brief 使用GNSS速度观测更新系统状态
+     *        update state using gnss velocity
+     * @param [in,out] gnssdata
+     * */
+    void gnssVelocityUpdate(GNSS &gnssdata);
+
+    /**
+     * @brief 零速更新（ZUPT）：当检测到载体静止时施加零速约束
+     *        Zero-velocity update (ZUPT): apply zero-velocity constraint when stationary
+     * */
+    void zuptUpdate();
+
+    /**
+     * @brief 检测当前是否处于零速状态
+     *        Detect whether the carrier is currently stationary (zero velocity)
+     * @param [in] imucur 当前IMU数据 / current imudata
+     * @return true if stationary
+     * */
+    bool detectZeroVelocity(const IMU &imucur) const;
+
+    /**
+     * @brief IMU数据合法性检查（NaN/Inf）
+     *        IMU data sanity check (NaN / Inf)
+     * @param [in] imu 待检查的IMU数据 / imudata to check
+     * @return true if valid
+     * */
+    static bool imuSanityCheck(const IMU &imu);
+
+    /**
      * @brief Kalman 预测,
      *        Kalman Filter Predict process
      * @param [in,out] Phi 状态转移矩阵
@@ -202,8 +240,18 @@ private:
      *                measurement matrix
      * @param [in] R  观测噪声阵
      *                measurement noise matrix
+     * @return true if measurement passed chi-square test and was accepted
      * */
-    void EKFUpdate(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R);
+    bool EKFUpdate(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R);
+
+    /**
+     * @brief Kalman 更新（不做卡方检验，用于ZUPT等内部约束）
+     *        Kalman Filter Update without chi-square test (for internal constraints such as ZUPT)
+     * @param [in] dz 观测新息 / measurement innovation
+     * @param [in] H  观测矩阵 / measurement matrix
+     * @param [in] R  观测噪声阵 / measurement noise matrix
+     * */
+    void EKFUpdateUnchecked(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R);
 
     /**
      * @brief 反馈误差状态到当前状态
@@ -214,14 +262,23 @@ private:
     /**
      * @brief 检查协方差对角线元素是否都为正
      *        Check if covariance diagonal elements are all positive
+     *        若出现负值，记录警告并尝试恢复（夹紧至小正值），而非直接退出程序
+     *        If negative values are found, log a warning and attempt recovery instead of terminating
      * */
     void checkCov() {
 
+        bool cov_negative = false;
         for (int i = 0; i < RANK; i++) {
             if (Cov_(i, i) < 0) {
-                std::cout << "Covariance is negative at " << std::setprecision(10) << timestamp_ << " !" << std::endl;
-                std::exit(EXIT_FAILURE);
+                std::cout << "[WARN] Covariance diagonal[" << i << "] is negative ("
+                          << std::setprecision(6) << Cov_(i, i) << ") at t="
+                          << std::setprecision(10) << timestamp_ << " s. Clamping to 1e-10." << std::endl;
+                Cov_(i, i) = 1e-10;
+                cov_negative = true;
             }
+        }
+        if (cov_negative) {
+            is_healthy_ = false;
         }
     }
 
@@ -229,6 +286,10 @@ private:
     GINSOptions options_;
 
     double timestamp_;
+
+    // 引擎健康状态标志（协方差出现负对角元素时置false）
+    // engine health flag (set false when covariance diagonal goes negative)
+    bool is_healthy_ = true;
 
     // 更新时间对齐误差，IMU状态和观测信息误差小于它则认为两者对齐
     // updata time align error

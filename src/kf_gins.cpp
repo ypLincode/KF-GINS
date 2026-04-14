@@ -357,6 +357,37 @@ bool loadConfig(YAML::Node &config, GINSOptions &options) {
     }
     options.antlever = Eigen::Vector3d(vec1.data());
 
+    // 读取卡方检验阈值（可选，缺省7.815，对应自由度3显著性水平0.05）
+    // load chi-square threshold (optional, default 7.815 for DOF=3, alpha=0.05)
+    try {
+        options.chi2_threshold = config["chi2_threshold"].as<double>();
+    } catch (YAML::Exception &) {
+        // use default value
+    }
+
+    // 读取ZUPT参数（可选）
+    // load ZUPT parameters (optional)
+    try {
+        options.enable_zupt = config["enable_zupt"].as<bool>();
+    } catch (YAML::Exception &) {
+        // use default value
+    }
+    try {
+        options.zupt_acc_threshold = config["zupt_acc_threshold"].as<double>();
+    } catch (YAML::Exception &) {
+        // use default value
+    }
+    try {
+        options.zupt_gyro_threshold = config["zupt_gyro_threshold"].as<double>();
+    } catch (YAML::Exception &) {
+        // use default value
+    }
+    try {
+        options.zupt_vel_std = config["zupt_vel_std"].as<double>();
+    } catch (YAML::Exception &) {
+        // use default value
+    }
+
     return true;
 }
 

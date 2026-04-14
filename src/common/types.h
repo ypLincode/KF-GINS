@@ -35,6 +35,10 @@ typedef struct GNSS {
     Vector3d blh;
     Vector3d std;
 
+    Vector3d vel;      // GNSS velocity in NED frame (m/s)
+    Vector3d vel_std;  // GNSS velocity std (m/s)
+
+    bool hasvelocity; // whether vel and vel_std are valid
     bool isvalid;
 } GNSS;
 

@@ -111,6 +111,9 @@ void GIEngine::newImuProcess() {
         // GNSS数据靠近上一历元，先对上一历元进行GNSS更新
         // gnssdata is near to the previous imudata, we should firstly do gnss update
         gnssUpdate(gnssdata_);
+        if (gnssdata_.hasvelocity) {
+            gnssVelocityUpdate(gnssdata_);
+        }
         stateFeedback();
 
         pvapre_ = pvacur_;
@@ -120,6 +123,9 @@ void GIEngine::newImuProcess() {
         // gnssdata is near current imudata, we should firstly propagate navigation state
         insPropagation(imupre_, imucur_);
         gnssUpdate(gnssdata_);
+        if (gnssdata_.hasvelocity) {
+            gnssVelocityUpdate(gnssdata_);
+        }
         stateFeedback();
     } else {
         // GNSS数据在两个IMU数据之间(不靠近任何一个), 将当前IMU内插到整秒时刻
@@ -134,12 +140,22 @@ void GIEngine::newImuProcess() {
         // 整秒时刻进行GNSS更新，并反馈系统状态
         // do GNSS position update at the whole second and feedback system states
         gnssUpdate(gnssdata_);
+        if (gnssdata_.hasvelocity) {
+            gnssVelocityUpdate(gnssdata_);
+        }
         stateFeedback();
 
         // 对后一半IMU进行状态传播
         // propagate navigation state for the second half imudata
         pvapre_ = pvacur_;
         insPropagation(midimu, imucur_);
+    }
+
+    // 零速检测与更新（ZUPT）
+    // zero-velocity detection and update (ZUPT)
+    if (options_.enable_zupt && detectZeroVelocity(imucur_)) {
+        zuptUpdate();
+        stateFeedback();
     }
 
     // 检查协方差矩阵对角线元素
@@ -169,6 +185,15 @@ void GIEngine::imuCompensate(IMU &imu) {
 }
 
 void GIEngine::insPropagation(IMU &imupre, IMU &imucur) {
+
+    // IMU数据合法性检查（NaN/Inf）
+    // IMU data sanity check (NaN / Inf)
+    if (!imuSanityCheck(imucur)) {
+        std::cout << "[WARN] IMU data contains NaN or Inf at t=" << std::setprecision(10) << imucur.time
+                  << " s. Skipping propagation." << std::endl;
+        is_healthy_ = false;
+        return;
+    }
 
     // 对当前IMU数据(imucur)补偿误差, 上一IMU数据(imupre)已经补偿过了
     // compensate imu error to 'imucur', 'imupre' has been compensated
@@ -327,8 +352,8 @@ void GIEngine::gnssUpdate(GNSS &gnssdata) {
     Eigen::MatrixXd R_gnsspos;
     R_gnsspos = gnssdata.std.cwiseProduct(gnssdata.std).asDiagonal();
 
-    // EKF更新协方差和误差状态
-    // do EKF update to update covariance and error state
+    // EKF更新协方差和误差状态（含卡方检验）
+    // do EKF update to update covariance and error state (with chi-square test)
     EKFUpdate(dz, H_gnsspos, R_gnsspos);
 
     // GNSS更新之后设置为不可用
@@ -366,22 +391,42 @@ void GIEngine::EKFPredict(Eigen::MatrixXd &Phi, Eigen::MatrixXd &Qd) {
     // propagate system covariance and error state
     Cov_ = Phi * Cov_ * Phi.transpose() + Qd;
     dx_  = Phi * dx_;
+
+    // 强制协方差对称，避免数值累积导致的非对称漂移
+    // enforce covariance symmetry to prevent asymmetric drift due to numerical accumulation
+    Cov_ = (Cov_ + Cov_.transpose()) / 2.0;
 }
 
-void GIEngine::EKFUpdate(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R) {
+bool GIEngine::EKFUpdate(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R) {
 
     assert(H.cols() == Cov_.rows());
     assert(dz.rows() == H.rows());
     assert(dz.rows() == R.rows());
     assert(dz.cols() == 1);
 
-    // 计算Kalman增益
-    // Compute Kalman Gain
-    auto temp         = H * Cov_ * H.transpose() + R;
-    Eigen::MatrixXd K = Cov_ * H.transpose() * temp.inverse();
+    // 计算新息协方差 S = H * P * H^T + R
+    // compute innovation covariance S = H * P * H^T + R
+    Eigen::MatrixXd S = H * Cov_ * H.transpose() + R;
 
-    // 更新系统误差状态和协方差
-    // update system error state and covariance
+    // 卡方检验：剔除异常观测
+    // chi-square test: reject outlier observations
+    // chi2 = dz^T * S^{-1} * dz; threshold from chi2 distribution (DOF = dim(dz))
+    Eigen::VectorXd Sinv_dz = S.ldlt().solve(dz);
+    double chi2             = (dz.transpose() * Sinv_dz)(0, 0);
+    if (chi2 > options_.chi2_threshold) {
+        std::cout << "[WARN] Measurement rejected by chi-square test at t=" << std::setprecision(10) << timestamp_
+                  << " s (chi2=" << std::setprecision(4) << chi2 << " > " << options_.chi2_threshold << ")."
+                  << std::endl;
+        return false;
+    }
+
+    // 使用LDLT分解计算Kalman增益，避免直接矩阵求逆带来的数值不稳定
+    // compute Kalman gain using LDLT decomposition to avoid numerical instability of direct inversion
+    // K = P * H^T * S^{-1}  =>  K^T = S^{-1} * H * P  =>  S * K^T = H * P
+    Eigen::MatrixXd K = S.ldlt().solve(H * Cov_).transpose();
+
+    // 更新系统误差状态和协方差（Joseph稳定形式）
+    // update system error state and covariance (Joseph stabilised form)
     Eigen::MatrixXd I;
     I.resizeLike(Cov_);
     I.setIdentity();
@@ -391,6 +436,36 @@ void GIEngine::EKFUpdate(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixX
     // the following formula can be simplified as : dx_ = K * dz;
     dx_  = dx_ + K * (dz - H * dx_);
     Cov_ = I * Cov_ * I.transpose() + K * R * K.transpose();
+
+    // 强制协方差对称
+    // enforce covariance symmetry
+    Cov_ = (Cov_ + Cov_.transpose()) / 2.0;
+
+    return true;
+}
+
+void GIEngine::EKFUpdateUnchecked(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R) {
+
+    assert(H.cols() == Cov_.rows());
+    assert(dz.rows() == H.rows());
+    assert(dz.rows() == R.rows());
+    assert(dz.cols() == 1);
+
+    // 使用LDLT分解计算Kalman增益（不做卡方检验）
+    // compute Kalman gain using LDLT decomposition (no chi-square test)
+    Eigen::MatrixXd S = H * Cov_ * H.transpose() + R;
+    Eigen::MatrixXd K = S.ldlt().solve(H * Cov_).transpose();
+
+    Eigen::MatrixXd I;
+    I.resizeLike(Cov_);
+    I.setIdentity();
+    I    = I - K * H;
+    dx_  = dx_ + K * (dz - H * dx_);
+    Cov_ = I * Cov_ * I.transpose() + K * R * K.transpose();
+
+    // 强制协方差对称
+    // enforce covariance symmetry
+    Cov_ = (Cov_ + Cov_.transpose()) / 2.0;
 }
 
 void GIEngine::stateFeedback() {
@@ -445,4 +520,88 @@ NavState GIEngine::getNavState() {
     state.imuerror = imuerror_;
 
     return state;
+}
+
+void GIEngine::gnssVelocityUpdate(GNSS &gnssdata) {
+
+    if (!gnssdata.hasvelocity) {
+        return;
+    }
+
+    // GNSS速度新息：导航系速度观测 - 当前估计速度
+    // GNSS velocity innovation: NED velocity measurement minus current estimated velocity
+    Eigen::MatrixXd dz(3, 1);
+    dz = gnssdata.vel - pvacur_.vel;
+
+    // 速度观测矩阵
+    // velocity measurement matrix: H maps state to NED velocity
+    Eigen::MatrixXd H_vel;
+    H_vel.resize(3, Cov_.rows());
+    H_vel.setZero();
+    H_vel.block(0, V_ID, 3, 3) = Eigen::Matrix3d::Identity();
+
+    // 速度观测噪声阵
+    // velocity measurement noise matrix
+    Eigen::MatrixXd R_vel;
+    R_vel = gnssdata.vel_std.cwiseProduct(gnssdata.vel_std).asDiagonal();
+
+    // EKF更新（含卡方检验）
+    // EKF update (with chi-square test)
+    EKFUpdate(dz, H_vel, R_vel);
+}
+
+bool GIEngine::detectZeroVelocity(const IMU &imucur) const {
+
+    if (imucur.dt <= 0) {
+        return false;
+    }
+
+    // 角速度量级 (rad/s)
+    // gyro rate magnitude (rad/s)
+    double gyro_norm = (imucur.dtheta / imucur.dt).norm();
+
+    // 比力量级 (m/s^2)；静止时比力≈重力，故检测 |f| - g 的偏差
+    // specific force magnitude (m/s^2); when stationary f ≈ gravity, detect deviation from g
+    double gravity    = Earth::gravity(pvacur_.pos);
+    double accel_norm = (imucur.dvel / imucur.dt).norm();
+    double accel_dev  = std::abs(accel_norm - gravity);
+
+    return (gyro_norm < options_.zupt_gyro_threshold) && (accel_dev < options_.zupt_acc_threshold);
+}
+
+void GIEngine::zuptUpdate() {
+
+    // 零速约束：载体当前速度应为零
+    // zero-velocity constraint: the carrier velocity should be zero
+    Eigen::MatrixXd dz(3, 1);
+    dz = -pvacur_.vel; // innovation = 0 - v_cur
+
+    // 速度观测矩阵
+    // velocity measurement matrix
+    Eigen::MatrixXd H_zupt;
+    H_zupt.resize(3, Cov_.rows());
+    H_zupt.setZero();
+    H_zupt.block(0, V_ID, 3, 3) = Eigen::Matrix3d::Identity();
+
+    // 零速测量噪声阵
+    // zero-velocity measurement noise matrix
+    double zupt_std = options_.zupt_vel_std;
+    Eigen::MatrixXd R_zupt = (Eigen::Vector3d(zupt_std, zupt_std, zupt_std)
+                                  .cwiseProduct(Eigen::Vector3d(zupt_std, zupt_std, zupt_std)))
+                                 .asDiagonal();
+
+    // EKF更新（ZUPT不做卡方检验，直接调用无检验的内部函数）
+    // EKF update for ZUPT (no chi-square test; call internal unchecked function)
+    EKFUpdateUnchecked(dz, H_zupt, R_zupt);
+}
+
+bool GIEngine::imuSanityCheck(const IMU &imu) {
+
+    if (!imu.dtheta.allFinite() || !imu.dvel.allFinite()) {
+        return false;
+    }
+    if (std::isnan(imu.time) || std::isinf(imu.time)) {
+        return false;
+    }
+    return true;
 }
