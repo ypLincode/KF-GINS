@@ -40,15 +40,25 @@ public:
 
         gnss_.time = data_[0];
         memcpy(gnss_.blh.data(), &data_[1], 3 * sizeof(double));
-
-        // 13列GNSS文件包含GNSS速度
-        if (data_.size() == 7) {
-            memcpy(gnss_.std.data(), &data_[4], 3 * sizeof(double));
-        } else {
-            memcpy(gnss_.std.data(), &data_[7], 3 * sizeof(double));
-        }
         gnss_.blh[0] *= D2R;
         gnss_.blh[1] *= D2R;
+
+        gnss_.hasvelocity = false;
+        gnss_.vel.setZero();
+        gnss_.vel_std.setZero();
+
+        // 13列GNSS文件格式: time(1)+blh(3)+vel_NED(3)+pos_std(3)+vel_std(3)
+        // 7列GNSS文件格式:  time(1)+blh(3)+pos_std(3)
+        // 13-column GNSS file: time(1)+blh(3)+vel_NED(3)+pos_std(3)+vel_std(3)
+        // 7-column  GNSS file: time(1)+blh(3)+pos_std(3)
+        if (data_.size() >= 13) {
+            memcpy(gnss_.vel.data(), &data_[4], 3 * sizeof(double));
+            memcpy(gnss_.std.data(), &data_[7], 3 * sizeof(double));
+            memcpy(gnss_.vel_std.data(), &data_[10], 3 * sizeof(double));
+            gnss_.hasvelocity = true;
+        } else {
+            memcpy(gnss_.std.data(), &data_[4], 3 * sizeof(double));
+        }
 
         return gnss_;
     }

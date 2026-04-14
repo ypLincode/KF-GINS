@@ -81,6 +81,17 @@ typedef struct GINSOptions {
     // install parameters
     Eigen::Vector3d antlever = {0, 0, 0};
 
+    // GNSS位置新息卡方检验阈值（自由度3, 显著水平0.05时为7.815）
+    // Chi-square threshold for GNSS position innovation test (DOF=3, alpha=0.05 -> 7.815)
+    double chi2_threshold = 7.815;
+
+    // 零速更新（ZUPT）开关及检测阈值
+    // Zero-velocity update (ZUPT) enable flag and detection thresholds
+    bool enable_zupt          = false;
+    double zupt_acc_threshold = 0.3;  // m/s^2, max |f_b - g| for static detection
+    double zupt_gyro_threshold = 0.02; // rad/s, max |omega_b| for static detection
+    double zupt_vel_std        = 0.01; // m/s, ZUPT velocity measurement noise std
+
     void print_options() {
         std::cout << "---------------KF-GINS Options:---------------" << std::endl;
 
