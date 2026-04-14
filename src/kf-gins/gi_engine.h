@@ -245,6 +245,15 @@ private:
     bool EKFUpdate(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R);
 
     /**
+     * @brief Kalman 更新（不做卡方检验，用于ZUPT等内部约束）
+     *        Kalman Filter Update without chi-square test (for internal constraints such as ZUPT)
+     * @param [in] dz 观测新息 / measurement innovation
+     * @param [in] H  观测矩阵 / measurement matrix
+     * @param [in] R  观测噪声阵 / measurement noise matrix
+     * */
+    void EKFUpdateUnchecked(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R);
+
+    /**
      * @brief 反馈误差状态到当前状态
      *        feedback error state to the current state
      * */

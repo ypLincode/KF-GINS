@@ -444,6 +444,30 @@ bool GIEngine::EKFUpdate(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixX
     return true;
 }
 
+void GIEngine::EKFUpdateUnchecked(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R) {
+
+    assert(H.cols() == Cov_.rows());
+    assert(dz.rows() == H.rows());
+    assert(dz.rows() == R.rows());
+    assert(dz.cols() == 1);
+
+    // 使用LDLT分解计算Kalman增益（不做卡方检验）
+    // compute Kalman gain using LDLT decomposition (no chi-square test)
+    Eigen::MatrixXd S = H * Cov_ * H.transpose() + R;
+    Eigen::MatrixXd K = S.ldlt().solve(H * Cov_).transpose();
+
+    Eigen::MatrixXd I;
+    I.resizeLike(Cov_);
+    I.setIdentity();
+    I    = I - K * H;
+    dx_  = dx_ + K * (dz - H * dx_);
+    Cov_ = I * Cov_ * I.transpose() + K * R * K.transpose();
+
+    // 强制协方差对称
+    // enforce covariance symmetry
+    Cov_ = (Cov_ + Cov_.transpose()) / 2.0;
+}
+
 void GIEngine::stateFeedback() {
 
     Eigen::Vector3d vectemp;
@@ -566,12 +590,9 @@ void GIEngine::zuptUpdate() {
                                   .cwiseProduct(Eigen::Vector3d(zupt_std, zupt_std, zupt_std)))
                                  .asDiagonal();
 
-    // EKF更新（ZUPT不做卡方检验，阈值放宽）
-    // EKF update (skip chi-square test for ZUPT; use a relaxed threshold via local option copy)
-    GINSOptions tmp_opts   = options_;
-    options_.chi2_threshold = 1e9; // effectively disabled for ZUPT
-    EKFUpdate(dz, H_zupt, R_zupt);
-    options_.chi2_threshold = tmp_opts.chi2_threshold;
+    // EKF更新（ZUPT不做卡方检验，直接调用无检验的内部函数）
+    // EKF update for ZUPT (no chi-square test; call internal unchecked function)
+    EKFUpdateUnchecked(dz, H_zupt, R_zupt);
 }
 
 bool GIEngine::imuSanityCheck(const IMU &imu) {
